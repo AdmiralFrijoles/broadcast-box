@@ -5,8 +5,6 @@ RUN npm install && npm run build
 
 FROM golang:alpine AS go-build
 WORKDIR /broadcast-box
-ENV GOPROXY=direct
-ENV GOSUMDB=off
 COPY . /broadcast-box
 RUN apk add git
 RUN go build
