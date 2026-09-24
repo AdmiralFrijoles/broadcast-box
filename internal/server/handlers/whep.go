@@ -17,8 +17,29 @@ import (
 )
 
 func whepHandler(responseWriter http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost && request.Method != http.MethodPatch {
+	if request.Method != http.MethodPost && request.Method != http.MethodPatch && request.Method != http.MethodDelete {
 		helpers.LogHTTPError(responseWriter, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	if request.Method == http.MethodDelete {
+		segments := strings.Split(strings.TrimPrefix(request.URL.Path, "/api/whep"), "/")
+		sessionID := strings.TrimSpace(segments[len(segments)-1])
+
+		if sessionID == "" {
+			slog.Info("API.WHEP.Delete Error: Missing session id")
+			helpers.LogHTTPError(responseWriter, "Missing session id", http.StatusBadRequest)
+			return
+		}
+
+		slog.Info("API.WHEP.Delete: Removing session", "sessionID", sessionID)
+		if err := webrtc.HandleWHEPDelete(sessionID); err != nil {
+			slog.Info("API.WHEP.Delete Error", "err", err)
+			helpers.LogHTTPError(responseWriter, err.Error(), http.StatusNotFound)
+			return
+		}
+
+		responseWriter.WriteHeader(http.StatusOK)
 		return
 	}
 

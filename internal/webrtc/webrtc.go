@@ -64,6 +64,18 @@ func HandleWHEPPatch(sessionID, body string) error {
 	return nil
 }
 
+func HandleWHEPDelete(sessionID string) error {
+	session, isFound := manager.SessionsManager.GetWHEPSessionByID(sessionID)
+
+	if !isFound {
+		return errors.New("no session found")
+	}
+
+	session.Close()
+
+	return nil
+}
+
 func HandleWHIPPatch(sessionID, body string) error {
 	session, isFound := manager.SessionsManager.GetSessionByID(sessionID)
 

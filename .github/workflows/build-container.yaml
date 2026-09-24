@@ -2,14 +2,16 @@ name: Build Container
 on:
   push:
     branches:
-      - main
+      - frijoles
     paths-ignore:
       - 'README.md'
       - 'CONTRIBUTING.md'
       - 'LICENSE'
       - '.github/**'
-    tags:
-      - v*
+
+permissions:
+  contents: read
+  packages: write
 
 jobs:
   docker:
@@ -18,17 +20,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: 'Login to GitHub Container Registry'
         uses: docker/login-action@v4
@@ -42,17 +35,15 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: |
-            seaduboi/broadcast-box
             ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=latest
-            type=ref,event=tag
 
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
           context: .
-          platforms: linux/amd64, linux/arm64
+          platforms: linux/amd64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

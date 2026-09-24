@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/glimesh/broadcast-box/internal/environment"
 	"github.com/glimesh/broadcast-box/internal/ip"
@@ -38,6 +39,11 @@ func getSettingEngine(isWHIP bool, tcpMuxCache map[string]ice.TCPMux, udpMuxCach
 	settingEngine.DisableSRTPReplayProtection(true)
 	settingEngine.SetIncludeLoopbackCandidate(os.Getenv(environment.IncludeLoopbackCandidate) != "")
 	settingEngine.SetSCTPMaxMessageSize(maxDataChannelMessageBytes)
+
+	// Drops a viewer about 6 seconds after it goes silent. The pion default is about 30.
+	if !isWHIP {
+		settingEngine.SetICETimeouts(2*time.Second, 4*time.Second, time.Second)
+	}
 
 	return
 }
