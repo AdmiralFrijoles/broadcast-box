@@ -106,6 +106,7 @@ func (s *Session) RemoveHost() {
 	host.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
 	host.RemovePeerConnection()
 	host.RemoveTracks()
+	s.endMedia()
 }
 
 func (s *Session) handleWHEPClose(whepSessionID string) {

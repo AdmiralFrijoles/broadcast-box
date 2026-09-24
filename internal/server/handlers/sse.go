@@ -80,6 +80,14 @@ func sseHandler(responseWriter http.ResponseWriter, request *http.Request) {
 			return
 		}
 
+		mediaEvents, replay, cancelMedia := streamSession.SubscribeMedia()
+		defer cancelMedia()
+		for _, event := range replay {
+			if !writeEvent(event) {
+				return
+			}
+		}
+
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 
@@ -88,6 +96,10 @@ func sseHandler(responseWriter http.ResponseWriter, request *http.Request) {
 			case <-ctx.Done():
 				slog.Info("API.SSE: Client disconnected")
 				return
+			case event := <-mediaEvents:
+				if !writeEvent(event) {
+					return
+				}
 			case <-ticker.C:
 				if whepSession.IsSessionClosed.Load() {
 					return

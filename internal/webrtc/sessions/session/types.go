@@ -34,4 +34,6 @@ type Session struct {
 
 	dataChannelPeersLock sync.RWMutex
 	dataChannelPeers     map[string]*dataChannelPeer
+
+	media mediaState
 }
