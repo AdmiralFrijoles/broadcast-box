@@ -105,8 +105,7 @@ func HandleWHIPDelete(sessionID string) error {
 		return errors.New("no session found")
 	}
 
-	session.RemoveHost()
-	if session.GetStreamStatus().ViewerCount == 0 {
+	if session.RemoveHostByID(sessionID) && session.GetStreamStatus().ViewerCount == 0 {
 		session.Close()
 	}
 

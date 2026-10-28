@@ -34,13 +34,9 @@ func WHIP(offer string, profile authorization.PublicProfile) (sdp string, sessio
 		return "", "", err
 	}
 
-	if err := session.AddHost(peerConnection); err != nil {
+	host, err := session.AddHost(peerConnection)
+	if err != nil {
 		return "", "", err
-	}
-
-	host := session.Host.Load()
-	if host == nil {
-		return "", "", errors.New("host session not available")
 	}
 
 	sdp = utils.DebugOutputAnswer(utils.AppendCandidateToAnswer(peerConnection.LocalDescription().SDP))

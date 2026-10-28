@@ -1,7 +1,6 @@
 package session
 
 import (
-	"fmt"
 	"log/slog"
 
 	"github.com/glimesh/broadcast-box/internal/server/authorization"
@@ -51,62 +50,129 @@ func (s *Session) AddWHEP(whepSessionID string, peerConnection *webrtc.PeerConne
 	return nil
 }
 
-// Add host
-func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (err error) {
+// Add host. A host that arrives while another streams waits as pending and takes over on its first keyframe.
+func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (*whip.WHIPSession, error) {
 	slog.Debug("Session.AddHost")
-
-	for {
-		host := s.Host.Load()
-		if host == nil {
-			break
-		}
-
-		if host.PeerConnection.ConnectionState() != webrtc.PeerConnectionStateClosed {
-			return fmt.Errorf("session already has a host")
-		}
-
-		if s.Host.CompareAndSwap(host, nil) {
-			break
-		}
-	}
 
 	host := &whip.WHIPSession{
 		ID:          uuid.New().String(),
 		AudioTracks: make(map[string]*whip.AudioTrack),
 		VideoTracks: make(map[string]*whip.VideoTrack),
 	}
-	host.SetOnClosed(s.handleHostClosed)
+	host.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
+	host.SetOnClosed(func() { s.handleHostClosed(host) })
+	host.SetOnKeyframe(func() { s.promoteHost(host) })
 
 	host.AddPeerConnection(peerConnection, s.StreamKey)
 	s.registerDataChannelHandlers(peerConnection, host.ID)
-	if !s.Host.CompareAndSwap(nil, host) {
-		host.RemovePeerConnection()
-		host.RemoveTracks()
-		return fmt.Errorf("session already has a host")
-	}
-	s.resetWHEPSessionsForNewHost()
-	host.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
-	s.updateHostWHEPSessionsSnapshot()
-	s.HasHost.Store(true)
 
-	return nil
+	var retired []*whip.WHIPSession
+	s.hostLock.Lock()
+	if current := s.Host.Load(); current != nil && current.IsOpen() {
+		slog.Info("Session.AddHost: Pending until keyframe", "streamKey", s.StreamKey, "id", host.ID)
+		if previous := s.PendingHost.Swap(host); previous != nil {
+			retired = append(retired, previous)
+		}
+	} else {
+		retired = s.installHostLocked(host)
+	}
+	s.hostLock.Unlock()
+	retireHosts(retired)
+
+	return host, nil
 }
 
-func (s *Session) RemoveHost() {
+// Call with hostLock held. Returns the replaced host, for retireHosts once the lock is released.
+func (s *Session) installHostLocked(host *whip.WHIPSession) (retired []*whip.WHIPSession) {
+	if previous := s.Host.Swap(host); previous != nil {
+		previous.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
+		retired = append(retired, previous)
+	}
+	s.resetWHEPSessionsForNewHost()
+	s.updateHostWHEPSessionsSnapshot()
+	s.HasHost.Store(true)
+	return retired
+}
 
-	host := s.Host.Swap(nil)
+// Runs on the pending host's video goroutine, before its keyframe is forwarded.
+func (s *Session) promoteHost(host *whip.WHIPSession) {
+	s.hostLock.Lock()
+	if s.PendingHost.Load() != host {
+		s.hostLock.Unlock()
+		return
+	}
+	s.PendingHost.Store(nil)
+	slog.Info("Session.PromoteHost", "streamKey", s.StreamKey, "id", host.ID)
+	retired := s.installHostLocked(host)
+	s.hostLock.Unlock()
+
+	// Closing the old peer connection here would hold up the keyframe.
+	go retireHosts(retired)
+}
+
+func retireHosts(hosts []*whip.WHIPSession) {
+	for _, host := range hosts {
+		host.RemovePeerConnection()
+		host.RemoveTracks()
+	}
+}
+
+// Removes the current host and any pending one.
+func (s *Session) RemoveHost() {
+	if pending := s.PendingHost.Load(); pending != nil {
+		s.removeHost(pending)
+	}
+	host := s.Host.Load()
 	if host == nil {
 		slog.Info("Session.RemoveHost", "streamKey", s.StreamKey, "msg", "No host to remove")
 		return
 	}
+	s.removeHost(host)
+}
 
-	slog.Info("Session.RemoveHost", "streamKey", s.StreamKey)
-	s.HasHost.Store(false)
+// Returns true when the stream lost its host and nothing took its place.
+func (s *Session) RemoveHostByID(id string) bool {
+	for _, host := range []*whip.WHIPSession{s.PendingHost.Load(), s.Host.Load()} {
+		if host != nil && host.ID == id {
+			return s.removeHost(host)
+		}
+	}
+	return false
+}
 
-	host.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
-	host.RemovePeerConnection()
-	host.RemoveTracks()
-	s.endMedia()
+// Returns true when the stream lost its host and nothing took its place.
+// A pending host takes over at once when the current one leaves.
+func (s *Session) removeHost(host *whip.WHIPSession) bool {
+	if host == nil {
+		return false
+	}
+
+	var retired []*whip.WHIPSession
+	ended := false
+	s.hostLock.Lock()
+	switch host {
+	case s.PendingHost.Load():
+		s.PendingHost.Store(nil)
+		retired = append(retired, host)
+	case s.Host.Load():
+		slog.Info("Session.RemoveHost", "streamKey", s.StreamKey, "id", host.ID)
+		if pending := s.PendingHost.Swap(nil); pending != nil {
+			retired = s.installHostLocked(pending)
+		} else {
+			s.Host.Store(nil)
+			s.HasHost.Store(false)
+			host.WHEPSessionsSnapshot.Store(make(map[string]*whep.WHEPSession))
+			retired = append(retired, host)
+			ended = true
+		}
+	}
+	s.hostLock.Unlock()
+
+	retireHosts(retired)
+	if ended {
+		s.endMedia()
+	}
+	return ended
 }
 
 func (s *Session) handleWHEPClose(whepSessionID string) {
@@ -130,10 +196,8 @@ func (s *Session) handleWHEPClose(whepSessionID string) {
 	}
 }
 
-func (s *Session) handleHostClosed() {
-	s.RemoveHost()
-
-	if s.isEmpty() {
+func (s *Session) handleHostClosed(host *whip.WHIPSession) {
+	if s.removeHost(host) && s.isEmpty() {
 		s.close()
 	}
 }

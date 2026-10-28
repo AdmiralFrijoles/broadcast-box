@@ -21,7 +21,10 @@ type Session struct {
 	IsPublic    bool
 	StreamStart time.Time
 
-	Host atomic.Pointer[whip.WHIPSession]
+	// Protects changes to Host and PendingHost
+	hostLock    sync.Mutex
+	Host        atomic.Pointer[whip.WHIPSession]
+	PendingHost atomic.Pointer[whip.WHIPSession]
 
 	closeOnce sync.Once
 	onClose   func()

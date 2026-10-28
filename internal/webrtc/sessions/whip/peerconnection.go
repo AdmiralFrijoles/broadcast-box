@@ -19,6 +19,19 @@ func (w *WHIPSession) notifyClosed() {
 	})
 }
 
+// Set before media arrives. onKeyframe runs once, on the streaming goroutine, before the first keyframe packet is forwarded.
+func (w *WHIPSession) SetOnKeyframe(onKeyframe func()) {
+	w.onKeyframe = onKeyframe
+}
+
+func (w *WHIPSession) notifyKeyframe() {
+	w.keyframeOnce.Do(func() {
+		if w.onKeyframe != nil {
+			w.onKeyframe()
+		}
+	})
+}
+
 func (w *WHIPSession) AddPeerConnection(peerConnection *webrtc.PeerConnection, streamKey string) {
 	slog.Info("WHIPSession.AddPeerConnection")
 
@@ -35,6 +48,17 @@ func (w *WHIPSession) AddPeerConnection(peerConnection *webrtc.PeerConnection, s
 	}
 
 	w.registerWHIPHandlers(peerConnection, streamKey)
+}
+
+func (w *WHIPSession) IsOpen() bool {
+	w.PeerConnectionLock.RLock()
+	defer w.PeerConnectionLock.RUnlock()
+
+	if w.PeerConnection == nil {
+		return false
+	}
+	state := w.PeerConnection.ConnectionState()
+	return state != webrtc.PeerConnectionStateClosed && state != webrtc.PeerConnectionStateFailed
 }
 
 func (w *WHIPSession) RemovePeerConnection() {
