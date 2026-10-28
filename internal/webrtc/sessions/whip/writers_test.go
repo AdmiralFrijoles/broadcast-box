@@ -1,6 +1,10 @@
 package whip
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/pion/rtp"
+)
 
 func TestH264KeyframeStart(t *testing.T) {
 	cases := []struct {
@@ -22,5 +26,21 @@ func TestH264KeyframeStart(t *testing.T) {
 		if got := isH264KeyframeStart(c.payload); got != c.want {
 			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestRTPStepsRunOnAcrossPublishers(t *testing.T) {
+	var steps rtpSteps
+	timeDiff, sequenceDiff := steps.next(&rtp.Packet{Header: rtp.Header{SequenceNumber: 40000, Timestamp: 7000}}, 960)
+	if timeDiff != 960 || sequenceDiff != 1 {
+		t.Fatalf("first packet stepped %d, %d", timeDiff, sequenceDiff)
+	}
+	timeDiff, sequenceDiff = steps.next(&rtp.Packet{Header: rtp.Header{SequenceNumber: 40001, Timestamp: 7960}}, 960)
+	if timeDiff != 960 || sequenceDiff != 1 {
+		t.Fatalf("next packet stepped %d, %d", timeDiff, sequenceDiff)
+	}
+	timeDiff, sequenceDiff = steps.next(&rtp.Packet{Header: rtp.Header{SequenceNumber: 2, Timestamp: 100}}, 960)
+	if sequenceDiff != 65536-40001+2 || timeDiff != 100-7960 {
+		t.Fatalf("a wrapped sequence stepped %d, %d", timeDiff, sequenceDiff)
 	}
 }

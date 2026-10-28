@@ -22,9 +22,15 @@ func (w *WHEPSession) SendAudioPacket(packet codecs.TrackPacket) {
 	}
 
 	w.AudioPacketsWritten += 1
+	w.AudioSequenceNumber = uint16(w.AudioSequenceNumber) + uint16(packet.SequenceDiff)
 	w.AudioTimestamp = uint32(int64(w.AudioTimestamp) + packet.TimeDiff)
+	audioSequenceNumber := w.AudioSequenceNumber
+	audioTimestamp := w.AudioTimestamp
 	audioTrack := w.AudioTrack
 	w.AudioLock.Unlock()
+
+	packet.Packet.SequenceNumber = audioSequenceNumber
+	packet.Packet.Timestamp = audioTimestamp
 
 	if err := audioTrack.WriteRTP(packet.Packet, packet.Codec); err != nil {
 		if errors.Is(err, io.ErrClosedPipe) {

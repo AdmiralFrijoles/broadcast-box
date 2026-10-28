@@ -32,6 +32,7 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 		return
 	}
 
+	var steps rtpSteps
 	rtpPkt := &rtp.Packet{}
 	rtpBuf := make([]byte, 1500)
 	for {
@@ -58,10 +59,13 @@ func (w *WHIPSession) audioWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 			sessions = sessionsAny.(map[string]*whep.WHEPSession)
 		}
 
+		timeDiff, sequenceDiff := steps.next(rtpPkt, audioFirstTimeDiff)
 		packet := codecs.TrackPacket{
-			Layer:  id,
-			Packet: rtpPkt,
-			Codec:  codec,
+			Layer:        id,
+			Packet:       rtpPkt,
+			Codec:        codec,
+			TimeDiff:     timeDiff,
+			SequenceDiff: sequenceDiff,
 		}
 
 		for _, whepSession := range sessions {
@@ -104,11 +108,7 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 		slog.Error("WHIPSession.VideoWriter.Depacketizer: No depacketizer was found for codec", "codec", codec)
 	}
 
-	lastTimestamp := uint32(0)
-	lastTimestampSet := false
-
-	lastSequenceNumber := uint16(0)
-	lastSequenceNumberSet := false
+	var steps rtpSteps
 
 	bitrateWindowStart := time.Now()
 	bitrateWindowBytes := uint64(0)
@@ -156,28 +156,7 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 			bitrateWindowBytes = 0
 		}
 
-		// A new publisher's first packet steps one sequence number and one frame past the last one
-		// viewers got. Repeating either makes viewers drop it as a duplicate and lose the keyframe.
-		timeDiff := int64(rtpPkt.Timestamp) - int64(lastTimestamp)
-		switch {
-		case !lastTimestampSet:
-			timeDiff = firstFrameTimeDiff
-			lastTimestampSet = true
-		case timeDiff < -(math.MaxUint32 / 10):
-			timeDiff += (math.MaxUint32 + 1)
-		}
-
-		sequenceDiff := int(rtpPkt.SequenceNumber) - int(lastSequenceNumber)
-		switch {
-		case !lastSequenceNumberSet:
-			lastSequenceNumberSet = true
-			sequenceDiff = 1
-		case sequenceDiff < -(math.MaxUint16 / 10):
-			sequenceDiff += (math.MaxUint16 + 1)
-		}
-
-		lastTimestamp = rtpPkt.Timestamp
-		lastSequenceNumber = rtpPkt.SequenceNumber
+		timeDiff, sequenceDiff := steps.next(rtpPkt, videoFirstTimeDiff)
 
 		var sessions map[string]*whep.WHEPSession
 		if sessionsAny := w.WHEPSessionsSnapshot.Load(); sessionsAny != nil {
@@ -201,9 +180,40 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 	}
 }
 
+// Viewers get each track's RTP numbering as steps from what they had, so it runs on across publishers.
+type rtpSteps struct {
+	lastTimestamp uint32
+	lastSequence  uint16
+	started       bool
+}
+
+// A new publisher's first packet steps one sequence number and one frame past the last one viewers
+// got. Repeating either makes viewers drop it as a duplicate, and its own numbers make them drop all of it.
+func (r *rtpSteps) next(pkt *rtp.Packet, firstTimeDiff int64) (timeDiff int64, sequenceDiff int) {
+	timeDiff = int64(pkt.Timestamp) - int64(r.lastTimestamp)
+	sequenceDiff = int(pkt.SequenceNumber) - int(r.lastSequence)
+	switch {
+	case !r.started:
+		timeDiff = firstTimeDiff
+	case timeDiff < -(math.MaxUint32 / 10):
+		timeDiff += math.MaxUint32 + 1
+	}
+	switch {
+	case !r.started:
+		sequenceDiff = 1
+	case sequenceDiff < -(math.MaxUint16 / 10):
+		sequenceDiff += math.MaxUint16 + 1
+	}
+	r.started = true
+	r.lastTimestamp = pkt.Timestamp
+	r.lastSequence = pkt.SequenceNumber
+	return timeDiff, sequenceDiff
+}
+
 const (
-	// One frame at 30 fps on the 90 kHz video clock.
-	firstFrameTimeDiff = 3000
+	// One frame at 30 fps on the 90 kHz video clock, and one 20 ms Opus frame at 48 kHz.
+	videoFirstTimeDiff = 3000
+	audioFirstTimeDiff = 960
 
 	naluTypeBitmask = 0x1f
 
