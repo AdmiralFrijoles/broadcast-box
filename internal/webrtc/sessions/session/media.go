@@ -3,7 +3,7 @@ package session
 import "sync"
 
 // Media events come from the host: title, and while it plays a file tracks, playback, cue, seek and end.
-// Title, tracks and playback are kept so viewers who join later can catch up.
+// The server adds switch when a new host takes over. Title, tracks and playback are kept for late joiners.
 type mediaState struct {
 	lock        sync.Mutex
 	title       string

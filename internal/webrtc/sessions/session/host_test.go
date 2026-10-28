@@ -33,8 +33,13 @@ func TestPendingHostTakesOverOnKeyframe(t *testing.T) {
 	old, next := newTestHost("old"), newTestHost("next")
 	s := newTestSession(old, next)
 	s.PublishMediaEvent("title", `{"type":"title"}`)
+	events, _, cancelEvents := s.SubscribeMedia()
+	defer cancelEvents()
 
 	s.promoteHost(next)
+	if got := <-events; got != mediaEvent(`{"type":"switch"}`) {
+		t.Fatalf("viewers were not told about the switch, got %q", got)
+	}
 
 	if s.Host.Load() != next || s.PendingHost.Load() != nil || !s.HasHost.Load() {
 		t.Fatalf("pending host did not take over")
@@ -66,8 +71,14 @@ func TestPendingHostTakesOverWhenCurrentLeaves(t *testing.T) {
 	old, next := newTestHost("old"), newTestHost("next")
 	s := newTestSession(old, next)
 
+	events, _, cancelEvents := s.SubscribeMedia()
+	defer cancelEvents()
+
 	if s.RemoveHostByID("old") {
 		t.Fatalf("stream reported as ended although a host was pending")
+	}
+	if got := <-events; got != mediaEvent(`{"type":"switch"}`) {
+		t.Fatalf("viewers were not told about the switch, got %q", got)
 	}
 	if s.Host.Load() != next || s.PendingHost.Load() != nil || !s.HasHost.Load() {
 		t.Fatalf("pending host did not take over")

@@ -105,9 +105,15 @@ func (s *Session) promoteHost(host *whip.WHIPSession) {
 	slog.Info("Session.PromoteHost", "streamKey", s.StreamKey, "id", host.ID)
 	retired := s.installHostLocked(host)
 	s.hostLock.Unlock()
+	s.publishSwitch()
 
 	// Closing the old peer connection here would hold up the keyframe.
 	go retireHosts(retired)
+}
+
+// Tells viewers the picture is about to change source, so they can blend into it.
+func (s *Session) publishSwitch() {
+	s.PublishMediaEvent("switch", `{"type":"switch"}`)
 }
 
 func retireHosts(hosts []*whip.WHIPSession) {
@@ -148,7 +154,7 @@ func (s *Session) removeHost(host *whip.WHIPSession) bool {
 	}
 
 	var retired []*whip.WHIPSession
-	ended := false
+	ended, switched := false, false
 	s.hostLock.Lock()
 	switch host {
 	case s.PendingHost.Load():
@@ -158,6 +164,7 @@ func (s *Session) removeHost(host *whip.WHIPSession) bool {
 		slog.Info("Session.RemoveHost", "streamKey", s.StreamKey, "id", host.ID)
 		if pending := s.PendingHost.Swap(nil); pending != nil {
 			retired = s.installHostLocked(pending)
+			switched = true
 		} else {
 			s.Host.Store(nil)
 			s.HasHost.Store(false)
@@ -171,6 +178,8 @@ func (s *Session) removeHost(host *whip.WHIPSession) bool {
 	retireHosts(retired)
 	if ended {
 		s.endMedia()
+	} else if switched {
+		s.publishSwitch()
 	}
 	return ended
 }
