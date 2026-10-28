@@ -1,6 +1,7 @@
 package whip
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -145,6 +146,7 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 		isKeyframe := isPacketKeyframe(rtpPkt, codec, depacketizer)
 		if isKeyframe {
 			track.LastKeyFrame.Store(time.Now())
+			w.notifyKeyframe()
 		}
 
 		now := time.Now()
@@ -154,10 +156,12 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 			bitrateWindowBytes = 0
 		}
 
+		// A new publisher's first packet steps one sequence number and one frame past the last one
+		// viewers got. Repeating either makes viewers drop it as a duplicate and lose the keyframe.
 		timeDiff := int64(rtpPkt.Timestamp) - int64(lastTimestamp)
 		switch {
 		case !lastTimestampSet:
-			timeDiff = 0
+			timeDiff = firstFrameTimeDiff
 			lastTimestampSet = true
 		case timeDiff < -(math.MaxUint32 / 10):
 			timeDiff += (math.MaxUint32 + 1)
@@ -167,7 +171,7 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 		switch {
 		case !lastSequenceNumberSet:
 			lastSequenceNumberSet = true
-			sequenceDiff = 0
+			sequenceDiff = 1
 		case sequenceDiff < -(math.MaxUint16 / 10):
 			sequenceDiff += (math.MaxUint16 + 1)
 		}
@@ -198,26 +202,58 @@ func (w *WHIPSession) videoWriter(remoteTrack *webrtc.TrackRemote, streamKey str
 }
 
 const (
+	// One frame at 30 fps on the 90 kHz video clock.
+	firstFrameTimeDiff = 3000
+
 	naluTypeBitmask = 0x1f
 
-	idrNALUType = 5
-	spsNALUType = 7
-	ppsNALUType = 8
+	idrNALUType   = 5
+	spsNALUType   = 7
+	ppsNALUType   = 8
+	stapaNALUType = 24
+	fuaNALUType   = 28
+
+	fuStartBitmask = 0x80
 )
 
-func isPacketKeyframe(pkt *rtp.Packet, codec codecs.TrackCodeType, depacketizer rtp.Depacketizer) bool {
+func isPacketKeyframe(pkt *rtp.Packet, codec codecs.TrackCodeType, _ rtp.Depacketizer) bool {
 	if codec == codecs.VideoTrackCodecH264 {
-		nalu, err := depacketizer.Unmarshal(pkt.Payload)
-
-		if err != nil || len(nalu) < 6 {
-			return false
-		}
-
-		firstNaluType := nalu[4] & naluTypeBitmask
-		return firstNaluType == idrNALUType || firstNaluType == spsNALUType || firstNaluType == ppsNALUType
+		return isH264KeyframeStart(pkt.Payload)
 	}
 
 	return true
+}
+
+// Reports whether the packet starts a keyframe. The depacketizer returns a fragmented NAL only on
+// its last packet, and a viewer started there misses the head of the frame.
+func isH264KeyframeStart(payload []byte) bool {
+	if len(payload) < 2 {
+		return false
+	}
+
+	switch naluType := payload[0] & naluTypeBitmask; naluType {
+	case stapaNALUType:
+		for offset := 1; offset+2 <= len(payload); {
+			size := int(binary.BigEndian.Uint16(payload[offset:]))
+			offset += 2
+			if size == 0 || offset+size > len(payload) {
+				return false
+			}
+			if isH264KeyframeNALU(payload[offset] & naluTypeBitmask) {
+				return true
+			}
+			offset += size
+		}
+		return false
+	case fuaNALUType:
+		return payload[1]&fuStartBitmask != 0 && payload[1]&naluTypeBitmask == idrNALUType
+	default:
+		return isH264KeyframeNALU(naluType)
+	}
+}
+
+func isH264KeyframeNALU(naluType byte) bool {
+	return naluType == idrNALUType || naluType == spsNALUType || naluType == ppsNALUType
 }
 
 // Helper function for getting the simulcast order and using as priority for consumers
