@@ -2,6 +2,7 @@ package session
 
 import (
 	"log/slog"
+	"time"
 
 	"github.com/glimesh/broadcast-box/internal/server/authorization"
 	"github.com/glimesh/broadcast-box/internal/webrtc/codecs"
@@ -10,6 +11,9 @@ import (
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
 )
+
+// How long a publisher replaced by a takeover may stay connected before the server closes it.
+const releasedHostGrace = 30 * time.Second
 
 func (s *Session) UpdateStreamStatus(profile authorization.PublicProfile) {
 	s.StatusLock.Lock()
@@ -66,16 +70,17 @@ func (s *Session) AddHost(peerConnection *webrtc.PeerConnection) (*whip.WHIPSess
 	host.AddPeerConnection(peerConnection, s.StreamKey)
 	s.registerDataChannelHandlers(peerConnection, host.ID)
 
-	var retired []*whip.WHIPSession
+	var retired, released []*whip.WHIPSession
 	s.hostLock.Lock()
 	if current := s.Host.Load(); current != nil && current.IsOpen() {
 		slog.Info("Session.AddHost: Pending until keyframe", "streamKey", s.StreamKey, "id", host.ID)
 		if previous := s.PendingHost.Swap(host); previous != nil {
-			retired = append(retired, previous)
+			released = append(released, previous)
 		}
 	} else {
 		retired = s.installHostLocked(host)
 	}
+	s.releaseHostsLocked(released)
 	s.hostLock.Unlock()
 	retireHosts(retired)
 
@@ -103,12 +108,51 @@ func (s *Session) promoteHost(host *whip.WHIPSession) {
 	}
 	s.PendingHost.Store(nil)
 	slog.Info("Session.PromoteHost", "streamKey", s.StreamKey, "id", host.ID)
-	retired := s.installHostLocked(host)
+	s.releaseHostsLocked(s.installHostLocked(host))
 	s.hostLock.Unlock()
 	s.publishSwitch()
+}
 
-	// Closing the old peer connection here would hold up the keyframe.
-	go retireHosts(retired)
+// Call with hostLock held. A replaced host stays connected until it leaves or releasedHostGrace passes.
+// Closing it from here sends a DTLS close alert, and the FFmpeg 9.1 WHIP muxer then hangs in its next read.
+func (s *Session) releaseHostsLocked(hosts []*whip.WHIPSession) {
+	for _, host := range hosts {
+		slog.Info("Session.ReleaseHost", "streamKey", s.StreamKey, "id", host.ID)
+		host.RemoveTracks()
+		if s.releasedHosts == nil {
+			s.releasedHosts = make(map[string]*whip.WHIPSession)
+		}
+		s.releasedHosts[host.ID] = host
+		time.AfterFunc(releasedHostGrace, func() { s.closeReleasedHost(host.ID) })
+	}
+}
+
+// Returns false when the ID is not a released host.
+func (s *Session) closeReleasedHost(id string) bool {
+	s.hostLock.Lock()
+	host, ok := s.releasedHosts[id]
+	delete(s.releasedHosts, id)
+	s.hostLock.Unlock()
+	if ok {
+		retireHosts([]*whip.WHIPSession{host})
+	}
+	return ok
+}
+
+// Reports whether id is the current, pending or a released host.
+func (s *Session) HasHostID(id string) bool {
+	s.hostLock.Lock()
+	_, released := s.releasedHosts[id]
+	s.hostLock.Unlock()
+	if released {
+		return true
+	}
+	for _, host := range []*whip.WHIPSession{s.PendingHost.Load(), s.Host.Load()} {
+		if host != nil && host.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // Tells viewers the picture is about to change source, so they can blend into it.
@@ -123,8 +167,17 @@ func retireHosts(hosts []*whip.WHIPSession) {
 	}
 }
 
-// Removes the current host and any pending one.
+// Removes the current host, any pending one and any released ones.
 func (s *Session) RemoveHost() {
+	s.hostLock.Lock()
+	ids := make([]string, 0, len(s.releasedHosts))
+	for id := range s.releasedHosts {
+		ids = append(ids, id)
+	}
+	s.hostLock.Unlock()
+	for _, id := range ids {
+		s.closeReleasedHost(id)
+	}
 	if pending := s.PendingHost.Load(); pending != nil {
 		s.removeHost(pending)
 	}
@@ -138,6 +191,9 @@ func (s *Session) RemoveHost() {
 
 // Returns true when the stream lost its host and nothing took its place.
 func (s *Session) RemoveHostByID(id string) bool {
+	if s.closeReleasedHost(id) {
+		return false
+	}
 	for _, host := range []*whip.WHIPSession{s.PendingHost.Load(), s.Host.Load()} {
 		if host != nil && host.ID == id {
 			return s.removeHost(host)
@@ -206,6 +262,9 @@ func (s *Session) handleWHEPClose(whepSessionID string) {
 }
 
 func (s *Session) handleHostClosed(host *whip.WHIPSession) {
+	if s.closeReleasedHost(host.ID) {
+		return
+	}
 	if s.removeHost(host) && s.isEmpty() {
 		s.close()
 	}

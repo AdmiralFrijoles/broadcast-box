@@ -26,6 +26,9 @@ type Session struct {
 	Host        atomic.Pointer[whip.WHIPSession]
 	PendingHost atomic.Pointer[whip.WHIPSession]
 
+	// Hosts taken off air by a takeover, by host ID, until they leave. Protected by hostLock.
+	releasedHosts map[string]*whip.WHIPSession
+
 	closeOnce sync.Once
 	onClose   func()
 
